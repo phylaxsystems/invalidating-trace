@@ -80,10 +80,23 @@ async function runForgeTests(envOverrides: Record<string, string> = {}) {
 	const env = buildFoundryEnv(envOverrides);
 	const forgeBinary = forgeBinaryPath;
 	if (!forgeBinary) {
-		throw new Error("forge binary path was not resolved. Ensure Foundry is installed before running tests.");
+		throw new Error(
+			"forge binary path was not resolved. Ensure Foundry is installed before running tests.",
+		);
 	}
-	const forgeArgs = ["test", "--color", "always", "-vvvv"];
-	log("Launching forge test run", { projectDir: FORGE_PROJECT_DIR, forgeBinary, args: forgeArgs });
+	const forgeArgs = [
+		"test",
+		"--color",
+		"always",
+		"-vvvv",
+		"--no-storage-caching",
+		"--no-cache",
+	];
+	log("Launching forge test run", {
+		projectDir: FORGE_PROJECT_DIR,
+		forgeBinary,
+		args: forgeArgs,
+	});
 	const forgeProcess = Bun.spawn({
 		cmd: [forgeBinary, ...forgeArgs],
 		cwd: FORGE_PROJECT_DIR,
