@@ -1,0 +1,8 @@
+node_modules
+bun.lockb
+.tmp
+.git
+.DS_Store
+foundry/out
+foundry/cache
+foundry/broadcast

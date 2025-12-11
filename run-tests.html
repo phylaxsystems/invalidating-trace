@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Foundry Tracer API Demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 2rem auto;
+        padding: 0 1rem;
+        max-width: 820px;
+        line-height: 1.4;
+      }
+
+      button {
+        padding: 0.5rem 1rem;
+        font-size: 1rem;
+        cursor: pointer;
+      }
+
+      pre {
+        background: #111;
+        color: #f8f8f2;
+        padding: 1rem;
+        overflow-x: auto;
+        border-radius: 0.5rem;
+        white-space: pre-wrap;
+      }
+
+      section {
+        margin-top: 1.5rem;
+      }
+
+      .controls {
+        display: flex;
+        gap: 1rem;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+
+      label {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        font-weight: 500;
+      }
+
+      input[type="number"] {
+        width: 4rem;
+        padding: 0.35rem;
+      }
+
+      .env-grid {
+        margin-top: 1rem;
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      }
+
+      .env-grid label {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .env-grid input,
+      .env-grid textarea {
+        width: 100%;
+        padding: 0.5rem;
+        border-radius: 0.35rem;
+        border: 1px solid rgba(255, 255, 255, 0.25);
+        background: rgba(0, 0, 0, 0.2);
+        color: inherit;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          monospace;
+      }
+
+      .env-grid textarea {
+        min-height: 90px;
+        resize: vertical;
+      }
+
+      #request-list {
+        display: grid;
+        gap: 1rem;
+      }
+
+      .request-card {
+        border-radius: 0.5rem;
+        padding: 1rem;
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+      }
+
+      .request-card.success {
+        border-color: #2ecc71;
+      }
+
+      .request-card.failure {
+        border-color: #e74c3c;
+      }
+
+      .request-card h3 {
+        margin: 0 0 0.5rem 0;
+      }
+
+      .request-card pre {
+        margin-top: 0.5rem;
+        background: rgba(0, 0, 0, 0.75);
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Foundry Test Runner</h1>
+    <p>
+      Click the button below to call <code>/api/run-tests</code> and display the
+      results.
+    </p>
+    <button id="run-tests">Run Tests</button>
+    <p id="status">Status: Idle</p>
+
+    <section>
+      <h2>stdout</h2>
+      <pre id="stdout">(no output)</pre>
+    </section>
+
+    <section>
+      <h2>stderr</h2>
+      <pre id="stderr">(no output)</pre>
+    </section>
+
+    <section>
+      <h2>Optional request payload</h2>
+      <p>
+        Provide any of the supported keys (<code>from</code>, <code>to</code>,
+        <code>value</code>, <code>rpc</code>, <code>calldata</code>,
+        <code>previous_tx</code>). They are forwarded as uppercase env vars for the
+        server-side Forge run.
+      </p>
+      <div class="env-grid">
+        <label>
+          From
+          <input id="env-from" placeholder="0xabc…" autocomplete="off" />
+        </label>
+        <label>
+          To
+          <input id="env-to" placeholder="0xdef…" autocomplete="off" />
+        </label>
+        <label>
+          Value
+          <input id="env-value" placeholder="1 ether" autocomplete="off" />
+        </label>
+        <label>
+          RPC
+          <input
+            id="env-rpc"
+            placeholder="https://rpc.example"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          Previous Tx
+          <input
+            id="env-previous_tx"
+            placeholder="0xdeadbeef"
+            autocomplete="off"
+          />
+        </label>
+        <label>
+          Calldata
+          <textarea
+            id="env-calldata"
+            placeholder="0x..."
+            spellcheck="false"
+          ></textarea>
+        </label>
+      </div>
+    </section>
+
+    <section>
+      <h2>Simulate concurrent runs</h2>
+      <p>
+        Fire several POST requests at once to see how the server serializes
+        them. Each simulated user starts immediately; completion order shows the
+        server-side queue.
+      </p>
+      <div class="controls">
+        <label>
+          Requests
+          <input
+            id="burst-count"
+            type="number"
+            min="2"
+            max="10"
+            value="3"
+          />
+        </label>
+        <button id="simulate-burst">Simulate Burst</button>
+      </div>
+      <div id="request-list"></div>
+    </section>
+
+    <script>
+      const DEFAULT_API_ORIGIN = "http://localhost:3000";
+      const origin =
+        window.location.protocol === "file:"
+          ? DEFAULT_API_ORIGIN
+          : window.location.origin;
+      const API_ENDPOINT = `${origin.replace(/\/$/, "")}/api/run-tests`;
+      const runButton = document.getElementById("run-tests");
+      const statusEl = document.getElementById("status");
+      const stdoutEl = document.getElementById("stdout");
+      const stderrEl = document.getElementById("stderr");
+      const burstButton = document.getElementById("simulate-burst");
+      const burstCountInput = document.getElementById("burst-count");
+      const requestList = document.getElementById("request-list");
+      const envInputs = {
+        from: document.getElementById("env-from"),
+        to: document.getElementById("env-to"),
+        value: document.getElementById("env-value"),
+        rpc: document.getElementById("env-rpc"),
+        calldata: document.getElementById("env-calldata"),
+        previous_tx: document.getElementById("env-previous_tx"),
+      };
+      const ENV_KEYS = [
+        "from",
+        "to",
+        "value",
+        "rpc",
+        "calldata",
+        "previous_tx",
+      ];
+      let simulatedRequestCounter = 0;
+
+      async function runTests() {
+        runButton.disabled = true;
+        statusEl.textContent = "Status: Running tests…";
+        stdoutEl.textContent = "(no output)";
+        stderrEl.textContent = "(no output)";
+
+        try {
+          const overrides = collectEnvOverrides();
+          const payload = await callApi(overrides);
+          const { success, exitCode, stdout, stderr, error } = payload;
+
+          statusEl.textContent = success
+            ? `Status: ✅ Tests passed (exit ${exitCode})`
+            : `Status: ❌ Tests failed (exit ${exitCode})`;
+
+          renderAnsiText(stdoutEl, stdout, "(no stdout)");
+          renderAnsiText(stderrEl, stderr || error, "(no stderr)");
+        } catch (err) {
+          statusEl.textContent = `Status: Request failed (${err})`;
+        } finally {
+          runButton.disabled = false;
+        }
+      }
+
+      async function callApi(payload = {}) {
+        const response = await fetch(API_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.json();
+      }
+
+      function collectEnvOverrides() {
+        const overrides = {};
+        for (const key of ENV_KEYS) {
+          const input = envInputs[key];
+          if (!input || typeof input.value !== "string") continue;
+          const value = input.value.trim();
+          if (value !== "") {
+            overrides[key] = value;
+          }
+        }
+        return overrides;
+      }
+
+      function createRequestCard(label) {
+        const card = document.createElement("article");
+        card.className = "request-card";
+
+        const title = document.createElement("h3");
+        title.textContent = label;
+
+        const status = document.createElement("p");
+        status.textContent = "Dispatching…";
+
+        const duration = document.createElement("p");
+        duration.textContent = "Duration: —";
+
+        const snippet = document.createElement("pre");
+        snippet.textContent = "(waiting for output)";
+
+        card.append(title, status, duration, snippet);
+        requestList.prepend(card);
+
+        return { card, status, duration, snippet };
+      }
+
+      async function createSimulatedRequest(label) {
+        const cardElements = createRequestCard(label);
+        const startedAt = performance.now();
+        const overrides = collectEnvOverrides();
+        if (!overrides.previous_tx) {
+          overrides.previous_tx = `${label.replace(/\s+/g, "-")}-${Date.now()}`;
+        }
+
+        try {
+          const payload = await callApi(overrides);
+          const finishedAt = performance.now();
+          const duration = ((finishedAt - startedAt) / 1000).toFixed(2);
+
+          cardElements.card.classList.add(
+            payload.success ? "success" : "failure",
+          );
+          cardElements.status.textContent = payload.success
+            ? `✅ Passed (exit ${payload.exitCode})`
+            : `❌ Failed (exit ${payload.exitCode})`;
+          cardElements.duration.textContent = `Duration: ${duration}s`;
+          const snippetText = (payload.stdout || payload.stderr || "")
+            .split("\n")
+            .slice(0, 6)
+            .join("\n");
+          renderAnsiText(cardElements.snippet, snippetText, "(no output)");
+        } catch (error) {
+          cardElements.card.classList.add("failure");
+          cardElements.status.textContent = `Request error: ${error}`;
+          cardElements.duration.textContent = "Duration: —";
+          cardElements.snippet.textContent = "";
+        }
+      }
+
+      function simulateBurst() {
+        const rawValue = Number(burstCountInput.value);
+        const count = Number.isFinite(rawValue)
+          ? Math.min(Math.max(Math.round(rawValue), 2), 10)
+          : 2;
+
+        for (let i = 0; i < count; i += 1) {
+          simulatedRequestCounter += 1;
+          const label = `Simulated request #${simulatedRequestCounter}`;
+          createSimulatedRequest(label);
+        }
+      }
+
+      runButton.addEventListener("click", runTests);
+      burstButton.addEventListener("click", simulateBurst);
+
+      function renderAnsiText(element, text, fallbackText) {
+        if (!text || text.trim() === "") {
+          element.textContent = fallbackText;
+          return;
+        }
+        element.innerHTML = ansiToHtml(text);
+      }
+
+      function ansiToHtml(input) {
+        const ANSI_REGEX = /\u001b\[(\d+(?:;\d+)*)m/g;
+        let html = "";
+        let lastIndex = 0;
+        let currentStyle = {};
+        let match;
+
+        while ((match = ANSI_REGEX.exec(input)) !== null) {
+          if (match.index > lastIndex) {
+            html += wrapSegment(input.slice(lastIndex, match.index), currentStyle);
+          }
+          currentStyle = applyAnsiCodes(match[1], currentStyle);
+          lastIndex = ANSI_REGEX.lastIndex;
+        }
+
+        if (lastIndex < input.length) {
+          html += wrapSegment(input.slice(lastIndex), currentStyle);
+        }
+
+        return html || "";
+      }
+
+      function wrapSegment(text, style) {
+        if (!text) return "";
+        const escaped = escapeHtml(text);
+        const styleText = styleToString(style);
+        if (!styleText) {
+          return escaped;
+        }
+        return `<span style="${styleText}">${escaped}</span>`;
+      }
+
+      function escapeHtml(str) {
+        return str
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      const ANSI_COLOR_MAP = {
+        30: "#2c3e50",
+        31: "#e74c3c",
+        32: "#2ecc71",
+        33: "#f1c40f",
+        34: "#3498db",
+        35: "#9b59b6",
+        36: "#1abc9c",
+        37: "#ecf0f1",
+        90: "#7f8c8d",
+        91: "#ff6b6b",
+        92: "#6fcf97",
+        93: "#ffe66d",
+        94: "#81b1ff",
+        95: "#d291ff",
+        96: "#4dd0e1",
+        97: "#ffffff",
+      };
+
+      const ANSI_BG_COLOR_MAP = {
+        40: "#2c3e50",
+        41: "#e74c3c",
+        42: "#27ae60",
+        43: "#b8860b",
+        44: "#2c3e7a",
+        45: "#8e44ad",
+        46: "#16a085",
+        47: "#bdc3c7",
+        100: "#7f8c8d",
+        101: "#c0392b",
+        102: "#27ae60",
+        103: "#d4ac0d",
+        104: "#2980b9",
+        105: "#9b59b6",
+        106: "#1abc9c",
+        107: "#ecf0f1",
+      };
+
+      function applyAnsiCodes(sequence, currentStyle) {
+        let style = { ...currentStyle };
+        const codes = sequence.split(";").map(Number);
+
+        for (const code of codes) {
+          if (Number.isNaN(code)) {
+            continue;
+          }
+          if (code === 0) {
+            style = {};
+            continue;
+          }
+          if (code === 1) {
+            style.fontWeight = "bold";
+            continue;
+          }
+          if (code === 22) {
+            delete style.fontWeight;
+            continue;
+          }
+          if (ANSI_COLOR_MAP[code]) {
+            style.color = ANSI_COLOR_MAP[code];
+            continue;
+          }
+          if (code === 39) {
+            delete style.color;
+            continue;
+          }
+          if (ANSI_BG_COLOR_MAP[code]) {
+            style.backgroundColor = ANSI_BG_COLOR_MAP[code];
+            continue;
+          }
+          if (code === 49) {
+            delete style.backgroundColor;
+            continue;
+          }
+        }
+
+        return style;
+      }
+
+      function styleToString(style) {
+        const rules = [];
+        if (style.color) {
+          rules.push(`color: ${style.color}`);
+        }
+        if (style.backgroundColor) {
+          rules.push(`background-color: ${style.backgroundColor}`);
+        }
+        if (style.fontWeight) {
+          rules.push(`font-weight: ${style.fontWeight}`);
+        }
+        return rules.join("; ");
+      }
+    </script>
+  </body>
+</html>
