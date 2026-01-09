@@ -125,16 +125,14 @@ export interface TraceRequest {
   chain_id: number;
   /** Transaction hash of the transaction being traced (0x prefixed, 64 hex characters) */
   transaction_hash: string;
+  /** Block number to fork at (block N-1, state at END of that block) */
+  fork_block_number: number;
   /** Transaction data for replay */
   transaction: TransactionData;
-  /** Block number containing the transaction */
-  block_number?: number;
-  /** Previous block number for context */
-  previous_block_number?: number;
   /** Previous transactions in the block for multi-block simulation (Linea) */
   previous_transactions?: EVMTransaction[];
-  /** Block environment context for accurate simulation */
-  block_env?: BlockEnv;
+  /** Block environment context for accurate simulation (REQUIRED) */
+  block_env: BlockEnv;
 }
 
 /**

@@ -31,11 +31,22 @@ function createValidTraceRequest(
     callback_url: "http://localhost:9999/callback",
     chain_id: 1,
     transaction_hash: "0x" + "a".repeat(64),
+    fork_block_number: 18500000,
     transaction: {
       from: "0x" + "a".repeat(40),
       to: "0x" + "b".repeat(40),
       value: "1000000000000000000",
       data: "0x",
+    },
+    block_env: {
+      number: "18500001",
+      timestamp: "1699000000",
+      beneficiary: "0x" + "1".repeat(40),
+      gas_limit: "30000000",
+      basefee: "10000000000",
+      difficulty: "0",
+      prevrandao: "0x" + "f".repeat(64),
+      blob_excess_gas_and_price: null,
     },
     ...overrides,
   };
@@ -81,6 +92,30 @@ function createTestApp(apiKeys: string[], callbackApiKey?: string) {
       if (request.transaction) {
         if (!request.transaction.from) missingFields.push("transaction.from");
         if (!request.transaction.value) missingFields.push("transaction.value");
+      }
+
+      // Validate fork_block_number (required)
+      if (
+        request.fork_block_number === undefined ||
+        request.fork_block_number === null
+      ) {
+        missingFields.push("fork_block_number");
+      }
+
+      // Validate block_env (required with all fields)
+      if (!request.block_env) {
+        missingFields.push("block_env");
+      } else {
+        if (!request.block_env.number) missingFields.push("block_env.number");
+        if (!request.block_env.timestamp)
+          missingFields.push("block_env.timestamp");
+        if (!request.block_env.beneficiary)
+          missingFields.push("block_env.beneficiary");
+        if (!request.block_env.basefee) missingFields.push("block_env.basefee");
+        if (!request.block_env.gas_limit)
+          missingFields.push("block_env.gas_limit");
+        if (request.block_env.difficulty === undefined)
+          missingFields.push("block_env.difficulty");
       }
 
       if (missingFields.length > 0) {
@@ -405,8 +440,13 @@ describe("POST /api/queue", () => {
       expect(response.status).toBe(202);
     });
 
-    it("accepts request with optional block_number", async () => {
-      const payload = createValidTraceRequest({ block_number: 12345678 });
+  });
+
+  describe("Required Fields - fork_block_number and block_env", () => {
+    it("returns 400 for missing fork_block_number", async () => {
+      const payload = createValidTraceRequest();
+      // @ts-expect-error - testing invalid payload
+      delete payload.fork_block_number;
 
       const response = await fetch(`http://localhost:${TEST_PORT}/api/queue`, {
         method: "POST",
@@ -417,11 +457,51 @@ describe("POST /api/queue", () => {
         body: JSON.stringify(payload),
       });
 
-      expect(response.status).toBe(202);
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as ErrorResponse;
+      expect(body.error).toContain("fork_block_number");
     });
 
-    it("accepts request with optional previous_block_number", async () => {
-      const payload = createValidTraceRequest({ previous_block_number: 12345677 });
+    it("returns 400 for missing block_env", async () => {
+      const payload = createValidTraceRequest();
+      // @ts-expect-error - testing invalid payload
+      delete payload.block_env;
+
+      const response = await fetch(`http://localhost:${TEST_PORT}/api/queue`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": VALID_API_KEY,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as ErrorResponse;
+      expect(body.error).toContain("block_env");
+    });
+
+    it("returns 400 for missing block_env.number", async () => {
+      const payload = createValidTraceRequest();
+      // @ts-expect-error - testing invalid payload
+      delete payload.block_env.number;
+
+      const response = await fetch(`http://localhost:${TEST_PORT}/api/queue`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": VALID_API_KEY,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      expect(response.status).toBe(400);
+      const body = (await response.json()) as ErrorResponse;
+      expect(body.error).toContain("block_env.number");
+    });
+
+    it("accepts request with complete fork_block_number and block_env", async () => {
+      const payload = createValidTraceRequest();
 
       const response = await fetch(`http://localhost:${TEST_PORT}/api/queue`, {
         method: "POST",
@@ -642,8 +722,7 @@ describe("POST /api/queue", () => {
   describe("Complex Request Scenarios", () => {
     it("accepts fully populated request with all optional fields", async () => {
       const payload = createValidTraceRequest({
-        block_number: 18500000,
-        previous_block_number: 18499999,
+        fork_block_number: 18499999,
         previous_transactions: [
           {
             type: 2,

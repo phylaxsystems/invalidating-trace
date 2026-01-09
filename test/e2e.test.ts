@@ -180,11 +180,22 @@ function createE2ETraceRequest(
     callback_url: callbackUrl,
     chain_id: 59141,
     transaction_hash: "0x" + "a".repeat(64),
+    fork_block_number: 1000000, // Linea Sepolia block to fork at
     transaction: {
       from: "0x" + "a".repeat(40),
       to: "0x" + "b".repeat(40),
       value: "0",
       data: "0x",
+    },
+    block_env: {
+      number: "1000001",
+      timestamp: "1699000000",
+      beneficiary: "0x" + "1".repeat(40),
+      gas_limit: "30000000",
+      basefee: "1000000000",
+      difficulty: "0",
+      prevrandao: "0x" + "f".repeat(64),
+      blob_excess_gas_and_price: null,
     },
     ...overrides,
   };
