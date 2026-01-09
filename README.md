@@ -124,6 +124,11 @@ Or on failure:
 
 The callback includes an `X-API-Key` header with `TRACER_CALLBACK_API_KEY` for your server to verify authenticity.
 
+**Important behaviors:**
+
+- **`trace_content` contains only the target transaction trace** - Setup traces, previous transaction traces, and test summaries are filtered out. You receive only the call tree for the transaction you requested.
+- **Reverting previous transactions don't halt the trace** - When `previous_transactions` includes transactions that revert, the tracer continues processing to accurately reconstruct blockchain state. This is essential for correct tracing since reverts are part of block history.
+
 **curl Example:**
 
 ```bash
@@ -248,6 +253,27 @@ Environment variables you may care about:
 | `TRACER_CALLBACK_API_KEY` | -                                    | API key sent in `X-API-Key` header when posting results to callback URLs. Helps callback receivers verify authenticity. |
 
 The server also injects `FORCE_COLOR=1`, `CLICOLOR=1`, and `CLICOLOR_FORCE=1` to keep colored logs when piping through Bun.
+
+## Local Testing
+
+For a complete walkthrough using a real Linea mainnet transaction, see the [Real-World Testing Example](docs/local-testing-example.md). It demonstrates:
+- Using `nc` (netcat) to simulate your dapp's callback endpoint
+- How `trace_content` returns only the target transaction trace
+- How reverting previous transactions don't halt the trace job
+
+Quick start:
+
+```bash
+# Terminal 1: Start callback listener (simulates your dapp's webhook)
+nc -l 8080
+
+# Terminal 2: Start tracer
+DAPP_API_KEYS=test-api-key bun --hot index.ts
+
+# Terminal 3: Send request (see docs/local-testing-example.md for full curl)
+```
+
+---
 
 ## Tips
 
