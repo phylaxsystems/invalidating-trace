@@ -476,22 +476,12 @@ async function processTrace(request: TraceRequest): Promise<void> {
 		// Use existing queue - handles serialization
 		const result = await enqueueForgeTestRun(forgeEnv);
 
-		// Extract only the relevant transaction trace (filters out setup, previous txs, summaries)
-		const extracted = extractTransactionTrace(result.stdout);
-
-		if (extracted.error) {
-			log("Trace extraction warning", {
-				transaction_hash: request.transaction_hash,
-				error: extracted.error,
-			});
-		}
-
+		// Dumb pipe: send raw forge output, parsing is done client-side
 		await sendCallback(request.callback_url, {
-			success: extracted.testPassed,
-			trace_content: extracted.trace || result.stdout, // Fallback to raw if extraction fails
+			success: result.exitCode === 0,
+			trace_content: result.stdout,
 			trace_format: "ansi",
 			duration_ms: Date.now() - startTime,
-			...(extracted.error && !extracted.trace && { error: extracted.error }),
 		});
 	} catch (error) {
 		log("Trace processing failed", {
@@ -508,112 +498,3 @@ async function processTrace(request: TraceRequest): Promise<void> {
 	}
 }
 
-/**
- * Extracts only the relevant transaction trace from forge test output.
- * Filters out: compiler output, setUp traces, previous tx traces, test summaries.
- * Returns only the call tree from testTracing() - specifically the invalidating transaction.
- */
-function extractTransactionTrace(rawOutput: string): {
-	trace: string;
-	testPassed: boolean;
-	error?: string;
-} {
-	const lines = rawOutput.split("\n");
-
-	// Look for testTracing() in trace output (strip ANSI codes for reliable matching)
-	const testTracingIndex = lines.findIndex((line) => {
-		const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
-		return stripped.includes("InvalidatingTrace::testTracing()");
-	});
-
-	if (testTracingIndex === -1) {
-		// testTracing() never ran - setUp must have failed
-		// This shouldn't happen now that we ignore previous tx reverts
-		return {
-			trace: "",
-			testPassed: false,
-			error: "Trace could not complete: testTracing() was not reached",
-		};
-	}
-
-	// Check if test passed or failed (strip ANSI codes for reliable detection)
-	const strippedOutput = rawOutput.replace(/\x1b\[[0-9;]*m/g, "");
-	const testPassed = !strippedOutput.includes("[FAIL");
-
-	// Find the first actual contract call after testTracing() line
-	// This is the invalidating transaction call
-	let startIndex = testTracingIndex + 1;
-
-	// Look for a line with a contract call (has [gas] followed by 0x address)
-	while (startIndex < lines.length) {
-		const line = lines[startIndex];
-		// Match lines like: "    └─ [XXX] 0xABC123::function(...)"
-		// Account for ANSI escape codes in the pattern
-		if (line.match(/\[\d[\d,]*\]\s*(?:\x1b\[\d+m)*0x[a-fA-F0-9]+/)) {
-			break;
-		}
-		startIndex++;
-	}
-
-	if (startIndex >= lines.length) {
-		return {
-			trace: "",
-			testPassed,
-			error: "Could not find transaction trace in output",
-		};
-	}
-
-	// Determine base indentation of the transaction call
-	const baseIndent = getIndentLevel(lines[startIndex]);
-
-	// Extract all lines that are part of this call tree
-	const traceLines: string[] = [];
-	for (let i = startIndex; i < lines.length; i++) {
-		const line = lines[i];
-
-		// Empty line or test summary markers indicate end of trace
-		if (
-			line.trim() === "" ||
-			line.includes("Suite result:") ||
-			(line.includes("Ran ") && line.includes(" test"))
-		) {
-			break;
-		}
-
-		const currentIndent = getIndentLevel(line);
-
-		// If we've returned to a shallower level than our base, we're done
-		// (but only after we've collected at least one line)
-		if (currentIndent < baseIndent && traceLines.length > 0) {
-			break;
-		}
-
-		traceLines.push(line);
-	}
-
-	// Trim leading whitespace from all lines to normalize indentation
-	// Find minimum indent and subtract it from all lines
-	const minIndent = Math.min(
-		...traceLines.filter((l) => l.trim()).map((l) => getIndentLevel(l)),
-	);
-	const normalizedLines = traceLines.map((line) => {
-		if (!line.trim()) return line;
-		return line.slice(minIndent);
-	});
-
-	return {
-		trace: normalizedLines.join("\n"),
-		testPassed,
-	};
-}
-
-/**
- * Gets the indentation level of a trace line (counts leading spaces).
- * Ignores ANSI escape codes when counting.
- */
-function getIndentLevel(line: string): number {
-	// Strip ANSI codes first, then count leading spaces
-	const stripped = line.replace(/\x1b\[[0-9;]*m/g, "");
-	const match = stripped.match(/^(\s*)/);
-	return match ? match[1].length : 0;
-}
