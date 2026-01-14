@@ -117,7 +117,7 @@ contract InvalidatingTrace is Test {
 
     function testTracing() public {
         // First execution of invalidating tx - this is what we trace
-        (bool success, bytes memory result) = address(invalidatingTo).call{value: value}(data);
+        (bool success, ) = address(invalidatingTo).call{value: value}(data);
         require(success);
     }
 }
