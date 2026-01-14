@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import { timingSafeEqual } from "crypto";
+import { metrics } from "./metrics";
 
 const log = (...args: unknown[]) => {
 	console.log(`[${new Date().toISOString()}]`, ...args);
@@ -59,6 +60,7 @@ export const authMiddleware = createMiddleware(async (c, next) => {
 
 	if (validKeys.length === 0) {
 		log("Auth warning: DAPP_API_KEYS not configured");
+		metrics.authRequestsTotal.inc({ result: "misconfigured" });
 		return c.json({ error: "Server misconfigured: API keys not set" }, 500);
 	}
 
@@ -67,6 +69,7 @@ export const authMiddleware = createMiddleware(async (c, next) => {
 			path: c.req.path,
 			method: c.req.method,
 		});
+		metrics.authRequestsTotal.inc({ result: "missing_key" });
 		return c.json({ error: "Unauthorized" }, 401);
 	}
 
@@ -76,8 +79,10 @@ export const authMiddleware = createMiddleware(async (c, next) => {
 			method: c.req.method,
 			// DO NOT log the actual key value
 		});
+		metrics.authRequestsTotal.inc({ result: "invalid_key" });
 		return c.json({ error: "Unauthorized" }, 401);
 	}
 
+	metrics.authRequestsTotal.inc({ result: "success" });
 	await next();
 });

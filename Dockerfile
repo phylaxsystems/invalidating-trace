@@ -20,6 +20,8 @@ RUN bun install --frozen-lockfile
 
 COPY --chown=bun:bun . .
 
+RUN cd ./foundry && /home/bun/.foundry/bin/forge install --no-git
+
 FROM oven/bun:1-slim AS runtime
 WORKDIR /app
 

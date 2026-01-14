@@ -4,6 +4,7 @@ import { access } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import type { TraceRequest, TraceCallbackPayload } from "./types";
 import { authMiddleware } from "./auth";
+import { metrics, renderMetrics } from "./metrics";
 
 const DEFAULT_FOUNDRY_HOME = process.env.HOME ?? "/tmp/foundry";
 const FOUNDRY_HOME = process.env.FOUNDRY_HOME ?? DEFAULT_FOUNDRY_HOME;
@@ -36,15 +37,70 @@ const log = (...args: unknown[]) => {
 const app = new Hono();
 
 app.use("/*", cors());
+app.use("*", async (c, next) => {
+	const method = c.req.method;
+	const path = c.req.path;
+	const start = performance.now();
+	metrics.httpRequestsInFlight.inc();
+
+	const requestSizeHeader = c.req.header("content-length");
+	if (requestSizeHeader) {
+		const requestSize = Number(requestSizeHeader);
+		if (Number.isFinite(requestSize) && requestSize > 0) {
+			metrics.httpRequestSizeBytes.observe(requestSize, { method, path });
+		}
+	}
+
+	try {
+		await next();
+		const status = c.res?.status ?? 200;
+		metrics.httpRequestsTotal.inc({
+			method,
+			path,
+			status: String(status),
+		});
+	} catch (error) {
+		metrics.httpRequestsTotal.inc({
+			method,
+			path,
+			status: "500",
+		});
+		throw error;
+	} finally {
+		const durationSeconds = (performance.now() - start) / 1000;
+		metrics.httpRequestDurationSeconds.observe(durationSeconds, {
+			method,
+			path,
+		});
+
+		const responseSizeHeader = c.res?.headers?.get("content-length");
+		if (responseSizeHeader) {
+			const responseSize = Number(responseSizeHeader);
+			if (Number.isFinite(responseSize) && responseSize > 0) {
+				metrics.httpResponseSizeBytes.observe(responseSize, { method, path });
+			}
+		}
+		metrics.httpRequestsInFlight.dec();
+	}
+});
 app.get("/", (c) => c.text("Hello world!"));
 app.get("/api/health", (c) => c.json({ status: "ok" }));
+app.get("/metrics", (c) =>
+	c.text(renderMetrics(), 200, {
+		"Content-Type": "text/plain; version=0.0.4; charset=utf-8",
+	}),
+);
 
 app.post("/api/run-tests", async (c) => {
+	const start = performance.now();
+	let outcome: "success" | "failure" | "error" = "error";
+
 	try {
 		const requestPayload = await readRequestPayload(c);
 		const envOverrides = buildRunEnvOverrides(requestPayload);
 		const result = await enqueueForgeTestRun(envOverrides);
 		const success = result.exitCode === 0;
+		outcome = success ? "success" : "failure";
 
 		return c.json(
 			{
@@ -58,7 +114,13 @@ app.post("/api/run-tests", async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		log("forge test run failed", message);
+		outcome = "error";
 		return c.json({ success: false, error: message }, 500);
+	} finally {
+		metrics.runTestsRequestsTotal.inc({ result: outcome });
+		metrics.runTestsDurationSeconds.observe(
+			(performance.now() - start) / 1000,
+		);
 	}
 });
 
@@ -104,11 +166,20 @@ app.post("/api/queue", authMiddleware, async (c) => {
 
 		if (missingFields.length > 0) {
 			log("Queue request validation failed", { missingFields });
+			metrics.traceRequestsTotal.inc({ result: "invalid" });
+			for (const field of missingFields) {
+				metrics.traceRequestMissingFieldsTotal.inc({ field });
+			}
 			return c.json(
 				{ error: `Missing required fields: ${missingFields.join(", ")}` },
 				400,
 			);
 		}
+
+		metrics.traceRequestsTotal.inc({ result: "queued" });
+		metrics.tracePreviousTransactions.observe(
+			request.previous_transactions?.length ?? 0,
+		);
 
 		// Fire-and-forget - don't await
 		processTrace(request);
@@ -125,6 +196,7 @@ app.post("/api/queue", authMiddleware, async (c) => {
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		log("Queue request failed", message);
+		metrics.traceRequestsTotal.inc({ result: "invalid" });
 		return c.json({ error: "Invalid request body" }, 400);
 	}
 });
@@ -148,6 +220,9 @@ function validateEnvironment(): void {
 		warnings.push(
 			"TRACER_CALLBACK_API_KEY not set - callbacks will be sent without authentication",
 		);
+		metrics.configWarningsTotal.inc({
+			name: "missing_tracer_callback_api_key",
+		});
 	}
 
 	// Required for incoming request authentication
@@ -155,6 +230,7 @@ function validateEnvironment(): void {
 		warnings.push(
 			"DAPP_API_KEYS not set - /api/queue endpoint will reject all requests",
 		);
+		metrics.configWarningsTotal.inc({ name: "missing_dapp_api_keys" });
 	}
 
 	// Log warnings
@@ -179,57 +255,86 @@ const server = Bun.serve({
 setupSignalHandlers();
 
 async function runForgeTests(envOverrides: Record<string, string> = {}) {
-	await ensureForge();
-	await ensureForgeProjectDirectory();
-	const env = buildFoundryEnv(envOverrides);
-	const forgeBinary = forgeBinaryPath;
-	if (!forgeBinary) {
-		throw new Error(
-			"forge binary path was not resolved. Ensure Foundry is installed before running tests.",
-		);
+	const runStart = performance.now();
+	metrics.forgeRunsInFlight.inc();
+
+	try {
+		await ensureForge();
+		await ensureForgeProjectDirectory();
+		const env = buildFoundryEnv(envOverrides);
+		const forgeBinary = forgeBinaryPath;
+		if (!forgeBinary) {
+			throw new Error(
+				"forge binary path was not resolved. Ensure Foundry is installed before running tests.",
+			);
+		}
+		const forgeArgs = [
+			"test",
+			"--color",
+			"always",
+			"-vvvv",
+			"--no-storage-caching",
+			"--no-cache",
+		];
+		log("Launching forge test run", {
+			projectDir: FORGE_PROJECT_DIR,
+			forgeBinary,
+			args: forgeArgs,
+		});
+		const forgeProcess = Bun.spawn({
+			cmd: [forgeBinary, ...forgeArgs],
+			cwd: FORGE_PROJECT_DIR,
+			stdout: "pipe",
+			stderr: "pipe",
+			env,
+		});
+
+		const stdout = new Response(forgeProcess.stdout).text();
+		const stderr = new Response(forgeProcess.stderr).text();
+		const exitCode = forgeProcess.exited;
+		const [stdoutText, stderrText, code] = await Promise.all([
+			stdout,
+			stderr,
+			exitCode,
+		]);
+
+		log("forge test exited", code);
+
+		const durationSeconds = (performance.now() - runStart) / 1000;
+		metrics.forgeRunDurationSeconds.observe(durationSeconds);
+		metrics.forgeRunsTotal.inc({
+			status: code === 0 ? "success" : "failure",
+		});
+		metrics.forgeRunExitCodeTotal.inc({ code: String(code) });
+		metrics.forgeRunStdoutBytes.observe(Buffer.byteLength(stdoutText));
+		metrics.forgeRunStderrBytes.observe(Buffer.byteLength(stderrText));
+
+		return {
+			exitCode: code,
+			stdout: stdoutText.trim(),
+			stderr: stderrText.trim(),
+		};
+	} catch (error) {
+		const durationSeconds = (performance.now() - runStart) / 1000;
+		metrics.forgeRunDurationSeconds.observe(durationSeconds);
+		metrics.forgeRunsTotal.inc({ status: "error" });
+		throw error;
+	} finally {
+		metrics.forgeRunsInFlight.dec();
 	}
-	const forgeArgs = [
-		"test",
-		"--color",
-		"always",
-		"-vvvv",
-		"--no-storage-caching",
-		"--no-cache",
-	];
-	log("Launching forge test run", {
-		projectDir: FORGE_PROJECT_DIR,
-		forgeBinary,
-		args: forgeArgs,
-	});
-	const forgeProcess = Bun.spawn({
-		cmd: [forgeBinary, ...forgeArgs],
-		cwd: FORGE_PROJECT_DIR,
-		stdout: "pipe",
-		stderr: "pipe",
-		env,
-	});
-
-	const stdout = new Response(forgeProcess.stdout).text();
-	const stderr = new Response(forgeProcess.stderr).text();
-	const exitCode = forgeProcess.exited;
-	const [stdoutText, stderrText, code] = await Promise.all([
-		stdout,
-		stderr,
-		exitCode,
-	]);
-
-	log("forge test exited", code);
-
-	return {
-		exitCode: code,
-		stdout: stdoutText.trim(),
-		stderr: stderrText.trim(),
-	};
 }
 
 function enqueueForgeTestRun(envOverrides: Record<string, string>) {
 	const overridesCopy = { ...envOverrides };
-	const run = forgeRunQueue.then(() => runForgeTests(overridesCopy));
+	const enqueuedAt = performance.now();
+	metrics.forgeQueueDepth.inc();
+	const run = forgeRunQueue.then(async () => {
+		metrics.forgeQueueDepth.dec();
+		metrics.forgeQueueWaitSeconds.observe(
+			(performance.now() - enqueuedAt) / 1000,
+		);
+		return runForgeTests(overridesCopy);
+	});
 	forgeRunQueue = run.then(
 		() => undefined,
 		() => undefined,
@@ -243,12 +348,17 @@ async function ensureForge() {
 			await access(candidate, fsConstants.X_OK);
 			forgeBinaryPath = candidate;
 			log("Found forge binary", candidate);
+			metrics.foundryChecksTotal.inc({
+				check: "forge",
+				result: "success",
+			});
 			return;
 		} catch {
 			continue;
 		}
 	}
 
+	metrics.foundryChecksTotal.inc({ check: "forge", result: "failure" });
 	throw new Error(
 		`forge binary missing or not executable. Checked locations: ${FORGE_CANDIDATES.join(
 			", ",
@@ -260,7 +370,15 @@ async function ensureForgeProjectDirectory() {
 	try {
 		await access(FORGE_PROJECT_DIR, fsConstants.X_OK);
 		log("Found forge project directory", FORGE_PROJECT_DIR);
+		metrics.foundryChecksTotal.inc({
+			check: "project_dir",
+			result: "success",
+		});
 	} catch {
+		metrics.foundryChecksTotal.inc({
+			check: "project_dir",
+			result: "failure",
+		});
 		throw new Error(
 			`Forge project directory missing or not accessible at ${FORGE_PROJECT_DIR}. Mount or copy your Foundry project there or set FORGE_PROJECT_DIR.`,
 		);
@@ -325,6 +443,7 @@ function buildRunEnvOverrides(payload: Record<string, unknown>) {
 function setupSignalHandlers() {
 	const shutdown = (signal: StopSignal) => {
 		log(`Received ${signal}. Stopping server.`);
+		metrics.shutdownSignalsTotal.inc({ signal });
 		server.stop();
 		process.exit(0);
 	};
@@ -345,6 +464,8 @@ async function sendCallback(
 	payload: TraceCallbackPayload,
 ): Promise<void> {
 	const startTime = Date.now();
+	const payloadText = JSON.stringify(payload);
+	metrics.callbackPayloadBytes.observe(Buffer.byteLength(payloadText));
 
 	try {
 		const apiKey = process.env.TRACER_CALLBACK_API_KEY;
@@ -365,10 +486,19 @@ async function sendCallback(
 				"Content-Type": "application/json",
 				"X-API-Key": apiKey || "",
 			},
-			body: JSON.stringify(payload),
+			body: payloadText,
 		});
 
 		const callbackDuration = Date.now() - startTime;
+		const callbackDurationSeconds = callbackDuration / 1000;
+		const statusLabel = response.ok ? "success" : "failure";
+		metrics.callbackDurationSeconds.observe(callbackDurationSeconds, {
+			status: statusLabel,
+		});
+		metrics.callbackRequestsTotal.inc({
+			status: statusLabel,
+			http_status: String(response.status),
+		});
 
 		if (!response.ok) {
 			log("Callback failed", {
@@ -384,6 +514,14 @@ async function sendCallback(
 		}
 	} catch (error) {
 		const callbackDuration = Date.now() - startTime;
+		const callbackDurationSeconds = callbackDuration / 1000;
+		metrics.callbackDurationSeconds.observe(callbackDurationSeconds, {
+			status: "error",
+		});
+		metrics.callbackRequestsTotal.inc({
+			status: "error",
+			http_status: "exception",
+		});
 		log("Callback error", {
 			error: error instanceof Error ? error.message : String(error),
 			duration_ms: callbackDuration,
@@ -401,6 +539,8 @@ async function sendCallback(
  */
 async function processTrace(request: TraceRequest): Promise<void> {
 	const startTime = Date.now();
+	metrics.traceRequestsInFlight.inc();
+	let outcome: "success" | "failure" = "failure";
 
 	try {
 		// Build forge environment from request data
@@ -475,10 +615,11 @@ async function processTrace(request: TraceRequest): Promise<void> {
 
 		// Use existing queue - handles serialization
 		const result = await enqueueForgeTestRun(forgeEnv);
+		outcome = result.exitCode === 0 ? "success" : "failure";
 
 		// Dumb pipe: send raw forge output, parsing is done client-side
 		await sendCallback(request.callback_url, {
-			success: result.exitCode === 0,
+			success: outcome === "success",
 			trace_content: result.stdout,
 			trace_format: "ansi",
 			duration_ms: Date.now() - startTime,
@@ -495,6 +636,12 @@ async function processTrace(request: TraceRequest): Promise<void> {
 			error_code: "TRACE_FAILED",
 			duration_ms: Date.now() - startTime,
 		});
+	} finally {
+		metrics.traceRequestsInFlight.dec();
+		metrics.traceDurationSeconds.observe(
+			(Date.now() - startTime) / 1000,
+			{ status: outcome },
+		);
+		metrics.traceResultsTotal.inc({ status: outcome });
 	}
 }
-
