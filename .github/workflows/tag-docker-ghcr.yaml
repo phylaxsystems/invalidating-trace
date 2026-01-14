@@ -1,0 +1,13 @@
+name: Build and push Docker (tag)
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  build:
+    uses: phylaxsystems/actions/.github/workflows/release-docker-ghcr-nodejs.yaml@main
+    with:
+      app-name: foundry-tracer-api
+      dockerfile-path: Dockerfile
