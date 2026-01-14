@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  check-main:
+  check-master:
     runs-on: ubuntu-latest
     outputs:
       allowed: ${{ steps.check.outputs.allowed }}
@@ -15,22 +15,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure tag is on main
+      - name: Ensure tag is on master
         id: check
         run: |
-          git fetch origin main
+          git fetch origin master
           TAG_COMMIT=$(git rev-list -n 1 "$GITHUB_REF")
 
-          if git merge-base --is-ancestor "$TAG_COMMIT" origin/main; then
+          if git merge-base --is-ancestor "$TAG_COMMIT" origin/master; then
             echo "allowed=true" >> "$GITHUB_OUTPUT"
           else
             echo "allowed=false" >> "$GITHUB_OUTPUT"
-            echo "Tag commit is not reachable from main; skipping build."
+            echo "Tag commit is not reachable from master; skipping build."
           fi
 
   build:
-    needs: check-main
-    if: needs.check-main.outputs.allowed == 'true'
+    needs: check-master
+    if: needs.check-master.outputs.allowed == 'true'
     uses: phylaxsystems/actions/.github/workflows/release-docker-ghcr-nodejs.yaml@main
     with:
       app-name: foundry-tracer-api
