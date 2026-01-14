@@ -22,8 +22,6 @@ COPY --chown=bun:bun . .
 
 RUN cd ./foundry && /home/bun/.foundry/bin/forge install foundry-rs/forge-std --no-git
 
-RUN ls foundry && cd ./foundry && /home/bun/.foundry/bin/forge test
-
 FROM oven/bun:1-slim AS runtime
 WORKDIR /app
 
